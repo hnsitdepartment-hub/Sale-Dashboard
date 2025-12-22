@@ -1,0 +1,400 @@
+import streamlit as st
+import pandas as pd
+import altair as alt
+from db.connection import get_connection_candelahns, get_connection_kdsdb
+
+# -------------------------------
+# AUTHENTICATION
+# -------------------------------
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
+    st.title("Admin Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type='password')
+    if st.button("Login"):
+        if username == 'admin' and password == '902729':
+            st.session_state.logged_in = True
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
+    st.stop()
+
+# -------------------------------
+# PAGE CONFIG
+# -------------------------------
+st.set_page_config(page_title="Admin Dashboard", layout="wide")
+
+# -------------------------------
+# DB CONNECTIONS
+# -------------------------------
+conn_sales = get_connection_candelahns()
+conn_kds = get_connection_kdsdb()
+
+# -------------------------------
+# TABS
+# -------------------------------
+tab_overview, tab_branches, tab_employees, tab_chefs, tab_targets = st.tabs([
+    "Dashboard Overview", "Branch Management", "Employee Management", "Chef Management", "Target Management"
+])
+
+# -------------------------------
+# FETCH DATA
+# -------------------------------
+# Active branches
+branches = pd.read_sql("SELECT shop_id, branch_name FROM dbo.branches WHERE is_active=1", conn_kds)
+
+# Chef targets
+df_chef_targets = pd.read_sql("SELECT shop_id, category_id, monthly_target as target_amount FROM dbo.cfg_branch_chef_targets", conn_kds)
+categories = pd.read_sql("SELECT category_id, category_name FROM dbo.cfg_chef_categories", conn_kds)
+
+# OT targets
+df_ot_targets = pd.read_sql("SELECT shop_id, employee_id, monthly_target as target_amount FROM dbo.ot_targets", conn_kds)
+# Fetch employee names from Candelahns
+import pyodbc
+conn_candelahns_temp = pyodbc.connect("DRIVER={SQL Server};SERVER=103.86.55.183,2001;DATABASE=Candelahns;UID=ReadOnlyUser;PWD=902729@Rafy")
+df_ot_employees = pd.read_sql("SELECT shop_employee_id, field_name FROM dbo.tblDefShopEmployees", conn_candelahns_temp)
+df_ot_employees.rename(columns={'shop_employee_id': 'employee_id', 'field_name': 'employee_name'}, inplace=True)
+conn_candelahns_temp.close()
+
+with tab_overview:
+    st.subheader("Dashboard Overview")
+
+    # Date inputs
+    start_date = st.date_input("Start Date", pd.to_datetime("2025-12-01"))
+    end_date = st.date_input("End Date", pd.to_datetime("2025-12-18"))
+
+    # Fetch sales data
+    df_sales = pd.read_sql(
+        f"""
+        SELECT shop_id, SUM(Nt_amount) AS total_sales
+        FROM tblSales
+        WHERE sale_date BETWEEN '{start_date}' AND '{end_date}'
+        GROUP BY shop_id
+        """, conn_sales
+    )
+
+    # Merge with branches
+    df_branch_sales = branches.merge(df_sales, on="shop_id", how="left").fillna(0)
+
+    # Employee sales
+    df_employee_sales = df_ot_targets.merge(df_ot_employees, on='employee_id', how='left').merge(df_sales, on='shop_id', how='left').fillna(0)[['employee_name', 'total_sales']].groupby('employee_name')['total_sales'].sum().reset_index().sort_values('total_sales', ascending=False)
+
+    # Product sales
+    df_product_sales = pd.read_sql(
+        f"""
+        SELECT t.field_name AS product, SUM((li.qty*li.Unit_price)/NULLIF(st.line_total,0)*s.Nt_amount) AS total_sales
+        FROM tblSales s
+        JOIN tblSalesLineItems li ON s.sale_id=li.sale_id
+        JOIN TempProductBarcode t ON li.Product_Item_ID=t.Product_Item_ID AND li.Product_code=t.Product_code
+        JOIN (
+            SELECT sale_id, SUM(qty*Unit_price) AS line_total
+            FROM tblSalesLineItems
+            GROUP BY sale_id
+        ) st ON st.sale_id=s.sale_id
+        WHERE s.sale_date BETWEEN '{start_date}' AND '{end_date}'
+        GROUP BY t.field_name
+        ORDER BY total_sales DESC
+        """, conn_sales
+    )
+
+    # Chef sales
+    df_chef_sales = df_chef_targets.merge(categories, on='category_id', how='left').merge(df_sales, on='shop_id', how='left').fillna(0)[['category_name', 'total_sales']].groupby('category_name')['total_sales'].sum().reset_index().sort_values('total_sales', ascending=False)
+
+    # Layout
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("Branch Sales")
+        st.dataframe(df_branch_sales[['branch_name', 'total_sales']].sort_values('total_sales', ascending=False), use_container_width=True)
+
+    with col2:
+        st.subheader("Top 10 Employees")
+        st.dataframe(df_employee_sales.head(10), use_container_width=True)
+
+    col3, col4 = st.columns(2)
+
+    with col3:
+        st.subheader("Top 10 Products")
+        st.dataframe(df_product_sales.head(10), use_container_width=True)
+
+    with col4:
+        st.subheader("Top 10 Chefs")
+        st.dataframe(df_chef_sales.head(10), use_container_width=True)
+
+with tab_branches:
+    st.subheader("Branch Management")
+
+    # Refresh branches
+    branches = pd.read_sql("SELECT shop_id, branch_name FROM dbo.branches WHERE is_active=1", conn_kds)
+    branch_targets_df = pd.read_sql("SELECT shop_id, monthly_target FROM dbo.branch_targets", conn_kds)
+
+    # Merge
+    branches_full = branches.merge(branch_targets_df, on='shop_id', how='left').fillna(0)
+
+    st.subheader("Current Branches")
+    st.dataframe(branches_full, use_container_width=True)
+
+    # Add Branch
+    st.subheader("Add New Branch")
+    with st.form("add_branch"):
+        shop_id = st.number_input("Shop ID", min_value=1, step=1)
+        branch_name = st.text_input("Branch Name")
+        monthly_target = st.number_input("Monthly Target", min_value=0.0)
+        if st.form_submit_button("Add Branch"):
+            try:
+                cursor = conn_kds.cursor()
+                cursor.execute("INSERT INTO dbo.branches (shop_id, branch_name, is_active) VALUES (?, ?, 1)", (shop_id, branch_name))
+                cursor.execute("INSERT INTO dbo.branch_targets (shop_id, monthly_target) VALUES (?, ?)", (shop_id, monthly_target))
+                conn_kds.commit()
+                st.success("Branch added successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    # Edit Branch
+    st.subheader("Edit Branch")
+    if not branches_full.empty:
+        edit_options = [f"{row['branch_name']} (ID: {row['shop_id']})" for _, row in branches_full.iterrows()]
+        selected_edit = st.selectbox("Select Branch to Edit", edit_options)
+        if selected_edit:
+            selected_shop_id = int(selected_edit.split("(ID: ")[1].strip(")"))
+            current_row = branches_full[branches_full['shop_id'] == selected_shop_id].iloc[0]
+            with st.form("edit_branch"):
+                new_name = st.text_input("Branch Name", value=current_row['branch_name'])
+                new_target = st.number_input("Monthly Target", value=current_row['monthly_target'])
+                if st.form_submit_button("Update Branch"):
+                    try:
+                        cursor = conn_kds.cursor()
+                        cursor.execute("UPDATE dbo.branches SET branch_name = ? WHERE shop_id = ?", (new_name, selected_shop_id))
+                        cursor.execute("UPDATE dbo.branch_targets SET monthly_target = ? WHERE shop_id = ?", (new_target, selected_shop_id))
+                        conn_kds.commit()
+                        st.success("Branch updated successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # Delete Branch
+    st.subheader("Delete Branch")
+    if not branches_full.empty:
+        delete_options = [f"{row['branch_name']} (ID: {row['shop_id']})" for _, row in branches_full.iterrows()]
+        selected_delete = st.selectbox("Select Branch to Delete", delete_options)
+        if selected_delete and st.button("Delete Branch"):
+            selected_shop_id = int(selected_delete.split("(ID: ")[1].strip(")"))
+            try:
+                cursor = conn_kds.cursor()
+                cursor.execute("DELETE FROM dbo.branch_targets WHERE shop_id = ?", (selected_shop_id,))
+                cursor.execute("UPDATE dbo.branches SET is_active = 0 WHERE shop_id = ?", (selected_shop_id,))
+                conn_kds.commit()
+                st.success("Branch deleted successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+with tab_employees:
+    st.subheader("Employee Management")
+
+    # Fetch employees
+    df_employees = pd.read_sql("SELECT shop_employee_id as employee_id, field_name as employee_name, shop_id FROM dbo.tblDefShopEmployees", conn_sales)
+
+    # Group by branch
+    branches_list = df_employees['shop_id'].unique()
+    for shop_id in branches_list:
+        branch_name = branches[branches['shop_id'] == shop_id]['branch_name'].iloc[0] if not branches[branches['shop_id'] == shop_id].empty else f"Branch {shop_id}"
+        st.subheader(f"Employees for {branch_name} (Shop ID: {shop_id})")
+        emp_df = df_employees[df_employees['shop_id'] == shop_id]
+        st.dataframe(emp_df[['employee_id', 'employee_name']], use_container_width=True)
+
+    # Add Employee
+    st.subheader("Add New Employee")
+    with st.form("add_employee"):
+        selected_branch = st.selectbox("Select Branch", branches['branch_name'].tolist())
+        shop_id_add = branches[branches['branch_name'] == selected_branch]['shop_id'].iloc[0]
+        employee_id = st.number_input("Employee ID", min_value=1, step=1)
+        employee_name = st.text_input("Employee Name")
+        if st.form_submit_button("Add Employee"):
+            try:
+                cursor = conn_sales.cursor()
+                cursor.execute("INSERT INTO dbo.tblDefShopEmployees (shop_employee_id, field_name, shop_id, is_active) VALUES (?, ?, ?, 1)", (employee_id, employee_name, shop_id_add))
+                conn_sales.commit()
+                st.success("Employee added successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    # Edit Employee
+    st.subheader("Edit Employee")
+    all_emp_options = [f"{row['employee_name']} (ID: {row['employee_id']}, Branch: {row['shop_id']})" for _, row in df_employees.iterrows()]
+    selected_edit_emp = st.selectbox("Select Employee to Edit", all_emp_options)
+    if selected_edit_emp:
+        emp_id_edit = int(float(selected_edit_emp.split("(ID: ")[1].split(",")[0]))
+        current_emp = df_employees[df_employees['employee_id'] == emp_id_edit].iloc[0]
+        with st.form("edit_employee"):
+            new_name = st.text_input("Employee Name", value=current_emp['employee_name'])
+            if st.form_submit_button("Update Employee"):
+                try:
+                    cursor = conn_sales.cursor()
+                    cursor.execute("UPDATE dbo.tblDefShopEmployees SET field_name = ? WHERE shop_employee_id = ?", (new_name, emp_id_edit))
+                    conn_sales.commit()
+                    st.success("Employee updated successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # Delete Employee
+    st.subheader("Delete Employee")
+    selected_delete_emp = st.selectbox("Select Employee to Delete", all_emp_options)
+    if selected_delete_emp and st.button("Delete Employee"):
+        emp_id_delete = int(float(selected_delete_emp.split("(ID: ")[1].split(",")[0]))
+        try:
+            cursor = conn_sales.cursor()
+            cursor.execute("DELETE FROM dbo.tblDefShopEmployees WHERE shop_employee_id = ?", (emp_id_delete,))
+            conn_sales.commit()
+            st.success("Employee deleted successfully!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+with tab_chefs:
+    st.subheader("Chef Management")
+
+    # Refresh data
+    categories = pd.read_sql("SELECT category_id, category_name FROM dbo.cfg_chef_categories", conn_kds)
+    df_chef_targets = pd.read_sql("SELECT shop_id, category_id, monthly_target FROM dbo.cfg_branch_chef_targets", conn_kds)
+
+    # Merge
+    df_chef_full = df_chef_targets.merge(categories, on='category_id', how='left').merge(branches[['shop_id', 'branch_name']], on='shop_id', how='left')
+
+    st.subheader("Current Chef Categories and Targets")
+    st.dataframe(df_chef_full, use_container_width=True)
+
+    # Add Category
+    st.subheader("Add New Category")
+    with st.form("add_category"):
+        category_name = st.text_input("Category Name")
+        targets = {}
+        for _, branch in branches.iterrows():
+            targets[branch['shop_id']] = st.number_input(f"Target for {branch['branch_name']}", min_value=0.0, key=f"target_{branch['shop_id']}")
+        if st.form_submit_button("Add Category"):
+            try:
+                cursor = conn_kds.cursor()
+                # Insert category
+                cursor.execute("INSERT INTO dbo.cfg_chef_categories (category_name) VALUES (?)", (category_name,))
+                category_id = cursor.execute("SELECT SCOPE_IDENTITY()").fetchone()[0]
+                # Insert targets
+                for shop_id, target in targets.items():
+                    cursor.execute("INSERT INTO dbo.cfg_branch_chef_targets (shop_id, category_id, monthly_target) VALUES (?, ?, ?)", (shop_id, category_id, target))
+                conn_kds.commit()
+                st.success("Category added successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    # Edit Category
+    st.subheader("Edit Category")
+    if not categories.empty:
+        edit_options = [f"{row['category_name']} (ID: {row['category_id']})" for _, row in categories.iterrows()]
+        selected_edit_cat = st.selectbox("Select Category to Edit", edit_options)
+        if selected_edit_cat:
+            cat_id = int(selected_edit_cat.split("(ID: ")[1].strip(")"))
+            current_cat = categories[categories['category_id'] == cat_id].iloc[0]
+            with st.form("edit_category"):
+                new_name = st.text_input("Category Name", value=current_cat['category_name'])
+                if st.form_submit_button("Update Category"):
+                    try:
+                        cursor = conn_kds.cursor()
+                        cursor.execute("UPDATE dbo.cfg_chef_categories SET category_name = ? WHERE category_id = ?", (new_name, cat_id))
+                        conn_kds.commit()
+                        st.success("Category updated successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # Delete Category
+    st.subheader("Delete Category")
+    if not categories.empty:
+        delete_options = [f"{row['category_name']} (ID: {row['category_id']})" for _, row in categories.iterrows()]
+        selected_delete_cat = st.selectbox("Select Category to Delete", delete_options)
+        if selected_delete_cat and st.button("Delete Category"):
+            cat_id = int(selected_delete_cat.split("(ID: ")[1].strip(")"))
+            try:
+                cursor = conn_kds.cursor()
+                cursor.execute("DELETE FROM dbo.cfg_branch_chef_targets WHERE category_id = ?", (cat_id,))
+                cursor.execute("DELETE FROM dbo.cfg_chef_categories WHERE category_id = ?", (cat_id,))
+                conn_kds.commit()
+                st.success("Category deleted successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+with tab_targets:
+    st.subheader("Target Management")
+
+    # Refresh data
+    df_ot_targets = pd.read_sql("SELECT shop_id, employee_id, monthly_target FROM dbo.ot_targets", conn_kds)
+
+    st.subheader("Current OT Targets")
+    ot_full = df_ot_targets.merge(df_ot_employees, on='employee_id', how='left').merge(branches[['shop_id', 'branch_name']], on='shop_id', how='left')
+    st.dataframe(ot_full, use_container_width=True)
+
+    # Add Target
+    st.subheader("Add New OT Target")
+    with st.form("add_ot_target"):
+        selected_branch_ot = st.selectbox("Select Branch", branches['branch_name'].tolist(), key="add_ot_branch")
+        selected_employee = st.selectbox("Select Employee", df_ot_employees['employee_name'].tolist(), key="add_ot_emp")
+        monthly_target = st.number_input("Monthly Target", min_value=0.0)
+        if st.form_submit_button("Add Target"):
+            shop_id = branches[branches['branch_name'] == selected_branch_ot]['shop_id'].iloc[0]
+            emp_id = df_ot_employees[df_ot_employees['employee_name'] == selected_employee]['employee_id'].iloc[0]
+            try:
+                cursor = conn_kds.cursor()
+                cursor.execute("INSERT INTO dbo.ot_targets (shop_id, employee_id, monthly_target) VALUES (?, ?, ?)", (shop_id, emp_id, monthly_target))
+                conn_kds.commit()
+                st.success("OT target added successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    # Edit Target
+    st.subheader("Edit OT Target")
+    if not ot_full.empty:
+        edit_options_ot = [f"{row['employee_name']} - {row['branch_name']} (Target: {row['monthly_target']})" for _, row in ot_full.iterrows()]
+        selected_edit_ot = st.selectbox("Select Target to Edit", edit_options_ot)
+        if selected_edit_ot:
+            # Parse to get employee and branch
+            emp_name = selected_edit_ot.split(" - ")[0]
+            branch_name = selected_edit_ot.split(" - ")[1].split(" (")[0]
+            shop_id = branches[branches['branch_name'] == branch_name]['shop_id'].iloc[0]
+            emp_id = df_ot_employees[df_ot_employees['employee_name'] == emp_name]['employee_id'].iloc[0]
+            current_target = ot_full[(ot_full['employee_id'] == emp_id) & (ot_full['shop_id'] == shop_id)]['monthly_target'].iloc[0]
+            with st.form("edit_ot_target"):
+                new_target = st.number_input("Monthly Target", value=current_target)
+                if st.form_submit_button("Update Target"):
+                    try:
+                        cursor = conn_kds.cursor()
+                        cursor.execute("UPDATE dbo.ot_targets SET monthly_target = ? WHERE shop_id = ? AND employee_id = ?", (new_target, shop_id, emp_id))
+                        conn_kds.commit()
+                        st.success("OT target updated successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # Delete Target
+    st.subheader("Delete OT Target")
+    if not ot_full.empty:
+        delete_options_ot = [f"{row['employee_name']} - {row['branch_name']} (Target: {row['monthly_target']})" for _, row in ot_full.iterrows()]
+        selected_delete_ot = st.selectbox("Select Target to Delete", delete_options_ot)
+        if selected_delete_ot and st.button("Delete Target"):
+            emp_name = selected_delete_ot.split(" - ")[0]
+            branch_name = selected_delete_ot.split(" - ")[1].split(" (")[0]
+            shop_id = branches[branches['branch_name'] == branch_name]['shop_id'].iloc[0]
+            emp_id = df_ot_employees[df_ot_employees['employee_name'] == emp_name]['employee_id'].iloc[0]
+            try:
+                cursor = conn_kds.cursor()
+                cursor.execute("DELETE FROM dbo.ot_targets WHERE shop_id = ? AND employee_id = ?", (shop_id, emp_id))
+                conn_kds.commit()
+                st.success("OT target deleted successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
