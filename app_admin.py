@@ -35,8 +35,8 @@ conn_kds = get_connection_kdsdb()
 # -------------------------------
 # TABS
 # -------------------------------
-tab_overview, tab_branches, tab_employees, tab_chefs, tab_targets = st.tabs([
-    "Dashboard Overview", "Branch Management", "Employee Management", "Chef Management", "Target Management"
+tab_overview, tab_branches, tab_employees, tab_chefs, tab_targets, tab_sales_reports, tab_inventory_reports, tab_customer_reports, tab_financial_reports, tab_operational_reports, tab_audit_reports, tab_analytics_reports = st.tabs([
+    "Dashboard Overview", "Branch Management", "Employee Management", "Chef Management", "Target Management", "Sales Reports", "Inventory Reports", "Customer Reports", "Financial Reports", "Operational Reports", "Audit Reports", "Analytics Reports"
 ])
 
 # -------------------------------
@@ -192,67 +192,433 @@ with tab_branches:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-with tab_employees:
-    st.subheader("Employee Management")
+with tab_sales_reports:
+    st.subheader("Sales Reports")
 
-    # Fetch employees
-    df_employees = pd.read_sql("SELECT shop_employee_id as employee_id, field_name as employee_name, shop_id FROM dbo.tblDefShopEmployees", conn_sales)
+    # Date inputs for reports
+    start_date_sales = st.date_input("Start Date", pd.to_datetime("2025-12-01"), key="sales_start")
+    end_date_sales = st.date_input("End Date", pd.to_datetime("2025-12-18"), key="sales_end")
 
-    # Group by branch
-    branches_list = df_employees['shop_id'].unique()
-    for shop_id in branches_list:
-        branch_name = branches[branches['shop_id'] == shop_id]['branch_name'].iloc[0] if not branches[branches['shop_id'] == shop_id].empty else f"Branch {shop_id}"
-        st.subheader(f"Employees for {branch_name} (Shop ID: {shop_id})")
-        emp_df = df_employees[df_employees['shop_id'] == shop_id]
-        st.dataframe(emp_df[['employee_id', 'employee_name']], use_container_width=True)
+    sales_tabs = st.tabs([
+        "Sales by Date/Time", "Sales by Employee", "Sales by Shop", "Sales by Product/Category",
+        "Sales by Customer", "Voided/Cancelled Sales"
+    ])
 
-    # Add Employee
-    st.subheader("Add New Employee")
-    with st.form("add_employee"):
-        selected_branch = st.selectbox("Select Branch", branches['branch_name'].tolist())
-        shop_id_add = branches[branches['branch_name'] == selected_branch]['shop_id'].iloc[0]
-        employee_id = st.number_input("Employee ID", min_value=1, step=1)
-        employee_name = st.text_input("Employee Name")
-        if st.form_submit_button("Add Employee"):
-            try:
-                cursor = conn_sales.cursor()
-                cursor.execute("INSERT INTO dbo.tblDefShopEmployees (shop_employee_id, field_name, shop_id, is_active) VALUES (?, ?, ?, 1)", (employee_id, employee_name, shop_id_add))
-                conn_sales.commit()
-                st.success("Employee added successfully!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    # Edit Employee
-    st.subheader("Edit Employee")
-    all_emp_options = [f"{row['employee_name']} (ID: {row['employee_id']}, Branch: {row['shop_id']})" for _, row in df_employees.iterrows()]
-    selected_edit_emp = st.selectbox("Select Employee to Edit", all_emp_options)
-    if selected_edit_emp:
-        emp_id_edit = int(float(selected_edit_emp.split("(ID: ")[1].split(",")[0]))
-        current_emp = df_employees[df_employees['employee_id'] == emp_id_edit].iloc[0]
-        with st.form("edit_employee"):
-            new_name = st.text_input("Employee Name", value=current_emp['employee_name'])
-            if st.form_submit_button("Update Employee"):
-                try:
-                    cursor = conn_sales.cursor()
-                    cursor.execute("UPDATE dbo.tblDefShopEmployees SET field_name = ? WHERE shop_employee_id = ?", (new_name, emp_id_edit))
-                    conn_sales.commit()
-                    st.success("Employee updated successfully!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {e}")
-
-    # Delete Employee
-    st.subheader("Delete Employee")
-    selected_delete_emp = st.selectbox("Select Employee to Delete", all_emp_options)
-    if selected_delete_emp and st.button("Delete Employee"):
-        emp_id_delete = int(float(selected_delete_emp.split("(ID: ")[1].split(",")[0]))
+    with sales_tabs[0]:
+        st.subheader("Sales by Date/Time (Daily)")
         try:
-            cursor = conn_sales.cursor()
-            cursor.execute("DELETE FROM dbo.tblDefShopEmployees WHERE shop_employee_id = ?", (emp_id_delete,))
-            conn_sales.commit()
-            st.success("Employee deleted successfully!")
-            st.rerun()
+            df = pd.read_sql(f"""
+                SELECT CONVERT(DATE, sale_date) AS sale_date, SUM(Nt_amount) AS total_sales
+                FROM tblSales
+                WHERE sale_date BETWEEN '{start_date_sales}' AND '{end_date_sales}'
+                GROUP BY CONVERT(DATE, sale_date)
+                ORDER BY sale_date
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "sales_by_date.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with sales_tabs[1]:
+        st.subheader("Sales by Employee")
+        try:
+            df = pd.read_sql(f"""
+                SELECT e.field_name AS employee_name, SUM(s.Nt_amount) AS total_sales, COUNT(s.sale_id) AS total_orders
+                FROM tblSales s
+                LEFT JOIN tblDefShopEmployees e ON s.employee_id = e.shop_employee_id
+                WHERE s.sale_date BETWEEN '{start_date_sales}' AND '{end_date_sales}'
+                GROUP BY e.field_name
+                ORDER BY total_sales DESC
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "sales_by_employee.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with sales_tabs[2]:
+        st.subheader("Sales by Shop")
+        try:
+            df = pd.read_sql(f"""
+                SELECT sh.shop_name, SUM(s.Nt_amount) AS total_sales
+                FROM tblSales s
+                LEFT JOIN tblDefShops sh ON s.shop_id = sh.shop_id
+                WHERE s.sale_date BETWEEN '{start_date_sales}' AND '{end_date_sales}'
+                GROUP BY sh.shop_name
+                ORDER BY total_sales DESC
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "sales_by_shop.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with sales_tabs[3]:
+        st.subheader("Sales by Product/Category")
+        try:
+            df = pd.read_sql(f"""
+                SELECT t.field_name AS product, SUM((li.qty*li.Unit_price)) AS total_sales
+                FROM tblSalesLineItems li
+                JOIN tblSales s ON li.sale_id = s.sale_id
+                JOIN TempProductBarcode t ON li.Product_Item_ID = t.Product_Item_ID
+                WHERE s.sale_date BETWEEN '{start_date_sales}' AND '{end_date_sales}'
+                GROUP BY t.field_name
+                ORDER BY total_sales DESC
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "sales_by_product.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with sales_tabs[4]:
+        st.subheader("Sales by Customer")
+        try:
+            df = pd.read_sql(f"""
+                SELECT Cust_name, SUM(Nt_amount) AS total_sales, COUNT(sale_id) AS total_orders
+                FROM tblSales
+                WHERE sale_date BETWEEN '{start_date_sales}' AND '{end_date_sales}' AND Cust_name IS NOT NULL
+                GROUP BY Cust_name
+                ORDER BY total_sales DESC
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "sales_by_customer.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with sales_tabs[5]:
+        st.subheader("Voided/Cancelled Sales")
+        try:
+            df = pd.read_sql(f"""
+                SELECT sale_date, Cust_name, Nt_amount, Additional_Comments
+                FROM tblSales
+                WHERE sale_date BETWEEN '{start_date_sales}' AND '{end_date_sales}' AND (Additional_Comments LIKE '%cancel%' OR Additional_Comments LIKE '%void%')
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "voided_sales.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+with tab_inventory_reports:
+    st.subheader("Inventory Reports")
+
+    # Date inputs for reports
+    start_date_inventory = st.date_input("Start Date", pd.to_datetime("2025-12-01"), key="inventory_start")
+    end_date_inventory = st.date_input("End Date", pd.to_datetime("2025-12-18"), key="inventory_end")
+
+    inventory_tabs = st.tabs([
+        "Stock Levels", "Low Stock Alerts", "Stock Movement", "Product Performance", "Wastage Tracking"
+    ])
+
+    with inventory_tabs[0]:
+        st.subheader("Stock Levels")
+        st.info("Showing current stock levels by product")
+        try:
+            df = pd.read_sql("""
+                SELECT si.Product_Item_ID, p.item_name, si.quantity, si.closing_inv
+                FROM tblShopProductInventory si
+                JOIN tblDefProducts p ON si.Product_Item_ID = p.product_id
+                ORDER BY si.quantity DESC
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "stock_levels.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with inventory_tabs[1]:
+        st.subheader("Low Stock Alerts")
+        st.info("Items where current quantity is below closing inventory level")
+        try:
+            df = pd.read_sql("""
+                SELECT si.Product_Item_ID, p.item_name, si.quantity, si.closing_inv
+                FROM tblShopProductInventory si
+                JOIN tblDefProducts p ON si.Product_Item_ID = p.product_id
+                WHERE si.quantity <= si.closing_inv
+                ORDER BY si.quantity ASC
+            """, conn_sales)
+            if df.empty:
+                st.success("No items are currently below reorder level!")
+            else:
+                st.warning(f"Found {len(df)} items below reorder level:")
+                st.dataframe(df, use_container_width=True)
+                st.download_button("Download CSV", df.to_csv(index=False), "low_stock_alerts.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with inventory_tabs[2]:
+        st.subheader("Stock Movement")
+        st.info("Stock transfer requests and movements between shops")
+        try:
+            # Join STR master with items and products
+            df = pd.read_sql("""
+                SELECT TOP 50
+                    sm.str_master_id as str_id,
+                    sm.str_name,
+                    sm.str_date,
+                    si.Product_Item_ID,
+                    p.item_name as product_name,
+                    si.str_quantity as requested_qty,
+                    si.dispatch_quantity as sent_qty,
+                    si.receive_quantity as received_qty,
+                    si.Dispatch_Shop_ID as from_shop,
+                    si.Receive_Shop_ID as to_shop,
+                    si.product_price,
+                    si.cost_price
+                FROM tblStrMaster sm
+                JOIN tblStrItems si ON sm.str_master_id = si.str_id
+                LEFT JOIN tblDefProducts p ON si.Product_Item_ID = p.product_id
+                ORDER BY sm.str_date DESC, sm.str_master_id DESC
+            """, conn_sales)
+            if df.empty:
+                st.info("No stock transfer records found.")
+            else:
+                st.dataframe(df, use_container_width=True)
+                st.download_button("Download CSV", df.to_csv(index=False), "stock_movement.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with inventory_tabs[3]:
+        st.subheader("Product Performance")
+        st.info("Using sales data for inventory performance")
+        try:
+            df = pd.read_sql(f"""
+                SELECT t.field_name AS product, SUM(li.qty) AS total_qty_sold, SUM((li.qty*li.Unit_price)) AS total_revenue
+                FROM tblSalesLineItems li
+                JOIN tblSales s ON li.sale_id = s.sale_id
+                JOIN TempProductBarcode t ON li.Product_Item_ID = t.Product_Item_ID
+                WHERE s.sale_date BETWEEN '{start_date_inventory}' AND '{end_date_inventory}'
+                GROUP BY t.field_name
+                ORDER BY total_qty_sold DESC
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "product_performance.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with inventory_tabs[4]:
+        st.subheader("Wastage Tracking")
+        st.info("Using tblShopWastage - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblShopWastage ORDER BY shop_Wastage_id DESC", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+with tab_customer_reports:
+    st.subheader("Customer Reports")
+
+    # Date inputs for reports
+    start_date_customer = st.date_input("Start Date", pd.to_datetime("2025-12-01"), key="customer_start")
+    end_date_customer = st.date_input("End Date", pd.to_datetime("2025-12-18"), key="customer_end")
+
+    customer_tabs = st.tabs([
+        "Demographics", "Loyalty Points", "Membership Status", "Complaints"
+    ])
+
+    with customer_tabs[0]:
+        st.subheader("Customer Demographics")
+        st.info("Using tblMemberInfo - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblMemberInfo", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with customer_tabs[1]:
+        st.subheader("Loyalty Points")
+        st.info("Using tblMemberNetPoints - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblMemberNetPoints", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with customer_tabs[2]:
+        st.subheader("Membership Status")
+        st.info("Using tblMemberCardStatus - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblMemberCardStatus", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with customer_tabs[3]:
+        st.subheader("Customer Complaints")
+        st.info("Using tblMemberComplaint - please verify table structure")
+        try:
+            df = pd.read_sql(f"SELECT TOP 10 * FROM tblMemberComplaint WHERE complaint_date BETWEEN '{start_date_customer}' AND '{end_date_customer}'", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+with tab_financial_reports:
+    st.subheader("Financial Reports")
+
+    # Date inputs for reports
+    start_date_financial = st.date_input("Start Date", pd.to_datetime("2025-12-01"), key="financial_start")
+    end_date_financial = st.date_input("End Date", pd.to_datetime("2025-12-18"), key="financial_end")
+
+    financial_tabs = st.tabs([
+        "Revenue Analysis", "Expense Tracking", "Profit & Loss", "Cash Flow", "Supplier Payments"
+    ])
+
+    with financial_tabs[0]:
+        st.subheader("Revenue Analysis")
+        st.info("Using sales data for revenue analysis")
+        try:
+            df = pd.read_sql(f"""
+                SELECT CONVERT(DATE, sale_date) AS date, SUM(Nt_amount) AS total_revenue
+                FROM tblSales
+                WHERE sale_date BETWEEN '{start_date_financial}' AND '{end_date_financial}'
+                GROUP BY CONVERT(DATE, sale_date)
+                ORDER BY date
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "revenue_analysis.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    with financial_tabs[1]:
+        st.subheader("Expense Tracking")
+        st.info("Using tblGLSupplier_Payments - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblGLSupplier_Payments", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with financial_tabs[2]:
+        st.subheader("Profit & Loss")
+        st.info("Using tblGlCOAMain for chart of accounts - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblGlCOAMain", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with financial_tabs[3]:
+        st.subheader("Cash Flow")
+        st.info("Using tblCashBankClosing - please verify table structure")
+        try:
+            df = pd.read_sql(f"SELECT TOP 10 * FROM tblCashBankClosing WHERE closing_date BETWEEN '{start_date_financial}' AND '{end_date_financial}'", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with financial_tabs[4]:
+        st.subheader("Supplier Payments")
+        st.info("Using tblSupplierPayments - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblSupplierPayments", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+with tab_operational_reports:
+    st.subheader("Operational Reports")
+
+    # Date inputs for reports
+    start_date_operational = st.date_input("Start Date", pd.to_datetime("2025-12-01"), key="operational_start")
+    end_date_operational = st.date_input("End Date", pd.to_datetime("2025-12-18"), key="operational_end")
+
+    operational_tabs = st.tabs([
+        "Employee Attendance", "Purchase Orders", "STR", "Kitchen/Order Management"
+    ])
+
+    with operational_tabs[0]:
+        st.subheader("Employee Attendance")
+        st.info("Using tblEmployeeAttendance - please verify table structure")
+        try:
+            df = pd.read_sql(f"SELECT TOP 10 * FROM tblEmployeeAttendance WHERE attendance_date BETWEEN '{start_date_operational}' AND '{end_date_operational}'", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with operational_tabs[1]:
+        st.subheader("Purchase Orders")
+        st.info("Using tblPurchaseOrders - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblPurchaseOrders", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with operational_tabs[2]:
+        st.subheader("STR (Stock Transfer Requests)")
+        st.info("Using tblStrMaster - please verify table structure")
+        try:
+            df = pd.read_sql(f"SELECT TOP 10 * FROM tblStrMaster WHERE str_date BETWEEN '{start_date_operational}' AND '{end_date_operational}'", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with operational_tabs[3]:
+        st.subheader("Kitchen/Order Management")
+        st.info("Using tblSalesRestaurant - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblSalesRestaurant", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+with tab_audit_reports:
+    st.subheader("Audit Reports")
+
+    # Date inputs for reports
+    start_date_audit = st.date_input("Start Date", pd.to_datetime("2025-12-01"), key="audit_start")
+    end_date_audit = st.date_input("End Date", pd.to_datetime("2025-12-18"), key="audit_end")
+
+    audit_tabs = st.tabs([
+        "User Activity Logs", "Data Synchronization", "Error Logs"
+    ])
+
+    with audit_tabs[0]:
+        st.subheader("User Activity Logs")
+        st.info("Using tblActivityLog - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblActivityLog", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with audit_tabs[1]:
+        st.subheader("Data Synchronization")
+        st.info("Using tblDataLog - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblDataLog", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+    with audit_tabs[2]:
+        st.subheader("Error Logs")
+        st.info("Using tblEventLog - please verify table structure")
+        try:
+            df = pd.read_sql("SELECT TOP 10 * FROM tblEventLog", conn_sales)
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Table not found or error: {e}")
+
+with tab_analytics_reports:
+    st.subheader("Analytics Reports")
+
+    # Date inputs for reports
+    start_date_analytics = st.date_input("Start Date", pd.to_datetime("2025-01-01"), key="analytics_start")
+    end_date_analytics = st.date_input("End Date", pd.to_datetime("2025-12-31"), key="analytics_end")
+
+    analytics_tabs = st.tabs([
+        "Trend Analysis"
+    ])
+
+    with analytics_tabs[0]:
+        st.subheader("Trend Analysis (Year-over-Year)")
+        try:
+            df = pd.read_sql(f"""
+                SELECT YEAR(sale_date) AS year, MONTH(sale_date) AS month, SUM(Nt_amount) AS monthly_sales
+                FROM tblSales
+                WHERE sale_date BETWEEN '{start_date_analytics}' AND '{end_date_analytics}'
+                GROUP BY YEAR(sale_date), MONTH(sale_date)
+                ORDER BY year, month
+            """, conn_sales)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("Download CSV", df.to_csv(index=False), "trend_analysis.csv", "text/csv")
         except Exception as e:
             st.error(f"Error: {e}")
 

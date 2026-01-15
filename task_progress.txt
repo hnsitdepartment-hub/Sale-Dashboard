@@ -1,0 +1,9 @@
+- [ ] Update tabs in app_admin.py to include new report tabs
+- [ ] Add Sales Reports tab with sub-tabs for all sales-related reports
+- [ ] Add Inventory Reports tab with sub-tabs for inventory-related reports
+- [ ] Add Customer Reports tab with sub-tabs for customer-related reports
+- [ ] Add Financial Reports tab with sub-tabs for financial reports
+- [ ] Add Operational Reports tab with sub-tabs for operational reports
+- [ ] Add Audit Reports tab with sub-tabs for audit and system reports
+- [ ] Add Analytics Reports tab with sub-tabs for advanced analytics
+- [ ] Test the app and fix any errors
