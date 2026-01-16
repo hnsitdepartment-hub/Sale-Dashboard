@@ -4,7 +4,7 @@ import streamlit as st
 from datetime import date, timedelta
 from typing import List
 import altair as alt
-from db.connection import get_connection_candelahns, get_connection_kdsdb
+from db.connection_cloud import get_connection_candelahns, get_connection_kdsdb
 
 # -------------------------------
 # UI CONFIG

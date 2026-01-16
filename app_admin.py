@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-from db.connection import get_connection_candelahns, get_connection_kdsdb
+from db.connection_cloud import get_connection_candelahns, get_connection_kdsdb
 
 # -------------------------------
 # AUTHENTICATION
